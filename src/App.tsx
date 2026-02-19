@@ -478,16 +478,28 @@ function App() {
   }, [decisionInput])
 
   const addCard = useCallback((rank: Rank): void => {
+    // Auto-flow: Player → Dealer → Player, then fully manual.
+    const playerCardCount = hands.playerHands[0]?.cards.length ?? 0
+    const isSingleHand =
+      hands.playerHands.length === 1 && hands.activePlayerHandIndex === 0
+
     const shouldAutoSwitchToDealer =
       activeTarget === 'player' &&
-      hands.playerHands.length === 1 &&
-      hands.activePlayerHandIndex === 0 &&
+      isSingleHand &&
       hands.dealerCards.length === 0 &&
-      (hands.playerHands[0]?.cards.length ?? 0) === 1
+      playerCardCount === 0
+
+    const shouldAutoSwitchToPlayer =
+      activeTarget === 'dealer' &&
+      isSingleHand &&
+      hands.dealerCards.length === 0
 
     dispatchHands({ type: 'ADD_CARD', target: activeTarget, rank })
+
     if (shouldAutoSwitchToDealer) {
       setActiveTarget('dealer')
+    } else if (shouldAutoSwitchToPlayer) {
+      setActiveTarget('player')
     }
   }, [activeTarget, hands.activePlayerHandIndex, hands.dealerCards.length, hands.playerHands])
 
