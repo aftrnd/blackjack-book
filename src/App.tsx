@@ -942,7 +942,7 @@ function App() {
         )}
       </section>
       <footer className="app-footer">
-        <span>v1.0.0 ©Nick Jackson</span>
+        <span>v1.1.0 ©Nick Jackson</span>
       </footer>
     </main>
   )
