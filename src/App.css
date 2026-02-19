@@ -11,6 +11,20 @@
   grid-column: 1 / -1;
 }
 
+.app-footer {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-start;
+  padding-top: 0.25rem;
+}
+
+.app-footer span {
+  font-size: 0.75rem;
+  color: #4a5a78;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+}
+
 .top h1 {
   margin: 0;
   font-size: 1.75rem;
