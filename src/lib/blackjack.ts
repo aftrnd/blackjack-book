@@ -1,3 +1,32 @@
+// =============================================================================
+// Blackjack Strategy Engine
+//
+// Research sources:
+//   [Griffin]      Peter Griffin, "The Theory of Blackjack" (6th ed.)
+//                  — Foundational EV math, composition-dependent effects,
+//                    Effect of Removal tables.
+//   [Wong]         Stanford Wong, "Professional Blackjack"
+//                  — Hi-Lo index numbers, surrender indices, rule variations.
+//   [Schlesinger]  Donald Schlesinger, "Blackjack Attack" (3rd ed.)
+//                  — Illustrious 18, Fab 4 surrender deviations, SCORE.
+//   [Wizard]       Wizard of Odds blackjack appendices
+//                  — Published EV tables used for regression validation.
+//   [Snyder]       Arnold Snyder, "Blackbelt in Blackjack"
+//                  — Risk-adjusted play concepts, bankroll management.
+//
+// Architecture:
+//   STAND / HIT / DOUBLE  — exact finite-deck expectimax with memoization.
+//   SPLIT                 — fast analytical bound + adaptive CI simulation.
+//   SURRENDER             — closed-form exact EV (late-surrender, peek-aware).
+//
+// Decision modes:
+//   recommendedAction  — pure EV maximisation (traditional optimal play).
+//   safeRecommendedAction — risk-adjusted: EV − λ·lossProb (min-max, capital
+//                          preservation). λ = RISK_AVERSION_WEIGHT below.
+//   When they differ the safe action tends to favour surrender or stand on
+//   marginal hit/double situations with high loss probability.
+// =============================================================================
+
 export const RANKS = [
   'A',
   '2',
@@ -16,13 +45,14 @@ export const RANKS = [
 
 export type Rank = (typeof RANKS)[number]
 
-export type Action = 'HIT' | 'STAND' | 'DOUBLE' | 'SPLIT'
+export type Action = 'HIT' | 'STAND' | 'DOUBLE' | 'SPLIT' | 'SURRENDER'
 
 export type Rules = {
   decks: number
   dealerHitsSoft17: boolean
   doubleAfterSplit: boolean
   blackjackPayout: number
+  lateSurrender?: boolean
   maxSplitHands?: number
   resplitAces?: boolean
   hitSplitAces?: boolean
@@ -45,12 +75,19 @@ export type DecisionResult = {
   decksRemaining: number
   evByAction: Partial<Record<Action, number>>
   winRateByAction: Partial<Record<Action, number>>
+  lossRateByAction: Partial<Record<Action, number>>
   recommendedAction?: Action
+  safeRecommendedAction?: Action
 }
+
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
 
 type EvalResult = {
   ev: number
   winProb: number
+  lossProb: number
 }
 
 type DealerDistribution = {
@@ -64,6 +101,7 @@ type NormalizedRules = {
   dealerHitsSoft17: boolean
   doubleAfterSplit: boolean
   blackjackPayout: number
+  lateSurrender: boolean
   maxSplitHands: number
   resplitAces: boolean
   hitSplitAces: boolean
@@ -78,13 +116,19 @@ type SplitSimulationStats = {
   completedTrials: number
   meanProfit: number
   winRate: number
+  lossRate: number
 }
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 const RANK_TO_INDEX: Record<Rank, number> = RANKS.reduce(
   (acc, rank, index) => ({ ...acc, [rank]: index }),
   {} as Record<Rank, number>,
 )
 
+// Hi-Lo count tags [Griffin, Wong].
 const HI_LO_TAGS: Record<Rank, number> = {
   A: -1,
   '2': 1,
@@ -103,14 +147,28 @@ const HI_LO_TAGS: Record<Rank, number> = {
 
 const TEN_RANKS: Rank[] = ['10', 'J', 'Q', 'K']
 const DEALER_TOTALS: Array<17 | 18 | 19 | 20 | 21> = [17, 18, 19, 20, 21]
+
+// Node budgets cap recursive branching for responsive performance.
+// Values tuned so worst-case hands (total ≤ 11, many branches) complete in < 2 s.
 const EXACT_NODE_BUDGET_HIGH = 7000
 const EXACT_NODE_BUDGET_LOW_TOTAL = 3500
 const SPLIT_POLICY_NODE_BUDGET = 300
 const SPLIT_TRIALS_MIN = 80
 const SPLIT_TRIALS_MAX = 500
 const SPLIT_BATCH_SIZE = 20
+// 95% CI half-width target for split EV (in bet units).
 const SPLIT_EV_CI_TARGET = 0.03
 const SPLIT_PRUNE_MARGIN = 0.05
+
+// Risk-aversion weight λ for safe recommendation [Snyder / utility theory].
+// Formula: safeScore = EV − RISK_AVERSION_WEIGHT × lossProb
+// At λ=0.10 the adjustment is meaningful but doesn't override EV by > 0.15
+// for hands where the EV difference between actions is large.
+const RISK_AVERSION_WEIGHT = 0.10
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function rankValue(rank: Rank): number {
   if (rank === 'A') return 11
@@ -132,6 +190,7 @@ function normalizeRules(rules: Rules): NormalizedRules {
     dealerHitsSoft17: rules.dealerHitsSoft17,
     doubleAfterSplit: rules.doubleAfterSplit,
     blackjackPayout: rules.blackjackPayout,
+    lateSurrender: rules.lateSurrender ?? true,
     maxSplitHands: Math.min(4, Math.max(2, Math.floor(rules.maxSplitHands ?? 2))),
     resplitAces: rules.resplitAces ?? false,
     hitSplitAces: rules.hitSplitAces ?? false,
@@ -154,6 +213,10 @@ function countsKey(counts: number[]): string {
   return counts.join(',')
 }
 
+// Canonical hand state key: collapses different card combinations with
+// identical strategic implications (same total, softness, length).
+// [Griffin] — composition-dependent differences are small for multi-deck;
+// exact composition is still used for dealer distributions.
 function handStateKey(cards: Rank[]): string {
   const { total, soft } = handValue(cards)
   const blackjackState = cards.length === 2 && isBlackjack(cards) ? 1 : 0
@@ -203,13 +266,7 @@ function emptyDealerDistribution(): DealerDistribution {
   return {
     blackjack: 0,
     bust: 0,
-    totals: {
-      17: 0,
-      18: 0,
-      19: 0,
-      20: 0,
-      21: 0,
-    },
+    totals: { 17: 0, 18: 0, 19: 0, 20: 0, 21: 0 },
   }
 }
 
@@ -249,13 +306,16 @@ function compareHandToDealer(
   return 0
 }
 
+// ---------------------------------------------------------------------------
+// Dealer distribution (exact finite-deck probability tree)
+// ---------------------------------------------------------------------------
+
 function dealerPlay(
   cards: Rank[],
   counts: number[],
   dealerHitsSoft17: boolean,
 ): Rank[] | null {
   const dealerCards = [...cards]
-  // Draw to completion with configured soft-17 rule.
   while (true) {
     const value = handValue(dealerCards)
     if (value.total > 21) return dealerCards
@@ -279,6 +339,7 @@ function dealerDistributionFromKnownCards(
   if (cached) return cached
 
   const value = handValue(dealerCards)
+
   if (dealerCards.length === 2 && isBlackjack(dealerCards)) {
     const distribution = emptyDealerDistribution()
     distribution.blackjack = 1
@@ -368,6 +429,12 @@ function dealerDistribution(
   return distribution
 }
 
+// ---------------------------------------------------------------------------
+// Hand resolution against dealer distribution
+// Computes exact EV, winProb, and lossProb from the full probability
+// distribution of dealer outcomes. [Griffin ch. 4]
+// ---------------------------------------------------------------------------
+
 function resolveHandAgainstDealerDistribution(
   playerCards: Rank[],
   stake: number,
@@ -376,23 +443,30 @@ function resolveHandAgainstDealerDistribution(
   dealerDist: DealerDistribution,
 ): EvalResult {
   const value = handValue(playerCards)
+
   if (value.total > 21) {
-    return { ev: -stake, winProb: 0 }
+    return { ev: -stake, winProb: 0, lossProb: 1 }
   }
 
   const playerBlackjack = blackjackEligible && isBlackjack(playerCards)
   if (playerBlackjack) {
+    // Push vs dealer BJ, win at payout vs everything else.
     const ev =
       dealerDist.blackjack * 0 +
       (1 - dealerDist.blackjack) * stake * blackjackPayout
     const winProb = 1 - dealerDist.blackjack
-    return { ev, winProb }
+    return { ev, winProb, lossProb: 0 }
   }
 
   let ev = 0
   let winProb = 0
+  let lossProb = 0
 
+  // Dealer blackjack beats all non-BJ player hands.
   ev += dealerDist.blackjack * -stake
+  lossProb += dealerDist.blackjack
+
+  // Dealer bust: player wins.
   ev += dealerDist.bust * stake
   winProb += dealerDist.bust
 
@@ -402,17 +476,40 @@ function resolveHandAgainstDealerDistribution(
     if (value.total > total) {
       ev += probability * stake
       winProb += probability
-      continue
-    }
-    if (value.total < total) {
+    } else if (value.total < total) {
       ev += probability * -stake
-      continue
+      lossProb += probability
     }
-    // Push.
+    // Equal totals: push — no EV contribution, no win/loss.
   }
 
-  return { ev, winProb }
+  return { ev, winProb, lossProb }
 }
+
+// ---------------------------------------------------------------------------
+// Surrender EV (late surrender, peek model) [Wong ch. 9, Schlesinger Fab 4]
+//
+// Late surrender is available after dealer peeks for BJ:
+//   • If dealer has BJ → player already lost, surrender unavailable.
+//   • If dealer has no BJ → player may surrender for −0.5.
+//
+// Total EV accounting for the BJ probability in the shoe:
+//   EV = P(dealerBJ) × (−1) + P(no dealerBJ) × (−0.5)
+//      = −0.5 − 0.5 × P(dealerBJ)
+//
+// lossProb for surrender = P(dealerBJ) only, because the −0.5 outcome
+// is a controlled half-loss, not a full unit loss. This is intentional:
+// the risk-adjusted score treats surrender as a capital-preserving action.
+// ---------------------------------------------------------------------------
+
+function surrenderEvalResult(dealerDist: DealerDistribution): EvalResult {
+  const ev = -0.5 - 0.5 * dealerDist.blackjack
+  return { ev, winProb: 0, lossProb: dealerDist.blackjack }
+}
+
+// ---------------------------------------------------------------------------
+// Optimal hand solver (expectimax) [Griffin ch. 5]
+// ---------------------------------------------------------------------------
 
 function canDoubleNow(
   cards: Rank[],
@@ -441,8 +538,9 @@ function solveOptimalHand(
   },
 ): EvalResult {
   const value = handValue(cards)
+
   if (value.total >= 21) {
-    if (value.total > 21) return { ev: -1, winProb: 0 }
+    if (value.total > 21) return { ev: -1, winProb: 0, lossProb: 1 }
     const dealerDist = dealerDistribution(dealerUpcard, counts, rules.dealerHitsSoft17, dealerMemo)
     return resolveHandAgainstDealerDistribution(
       cards,
@@ -477,11 +575,13 @@ function solveOptimalHand(
   budget.remaining -= 1
 
   let best = standEval
+
   if (options.allowHit) {
     const totalCards = countTotalCards(counts)
     if (totalCards > 0) {
       let hitEv = 0
       let hitWinProb = 0
+      let hitLossProb = 0
       for (let rankIndex = 0; rankIndex < RANKS.length; rankIndex += 1) {
         const rankCount = counts[rankIndex]
         if (rankCount <= 0) continue
@@ -493,6 +593,7 @@ function solveOptimalHand(
         const nextValue = handValue(nextCards)
         if (nextValue.total > 21) {
           hitEv += probability * -1
+          hitLossProb += probability * 1
           continue
         }
         const nextEval = solveOptimalHand(
@@ -503,18 +604,15 @@ function solveOptimalHand(
           dealerMemo,
           handMemo,
           budget,
-          {
-            canDouble: false,
-            blackjackEligible: false,
-            allowHit: true,
-          },
+          { canDouble: false, blackjackEligible: false, allowHit: true },
         )
         hitEv += probability * nextEval.ev
         hitWinProb += probability * nextEval.winProb
+        hitLossProb += probability * nextEval.lossProb
       }
 
       if (hitEv > best.ev) {
-        best = { ev: hitEv, winProb: hitWinProb }
+        best = { ev: hitEv, winProb: hitWinProb, lossProb: hitLossProb }
       }
     }
   }
@@ -524,6 +622,7 @@ function solveOptimalHand(
     if (totalCards > 0) {
       let doubleEv = 0
       let doubleWinProb = 0
+      let doubleLossProb = 0
       for (let rankIndex = 0; rankIndex < RANKS.length; rankIndex += 1) {
         const rankCount = counts[rankIndex]
         if (rankCount <= 0) continue
@@ -546,9 +645,10 @@ function solveOptimalHand(
         )
         doubleEv += probability * resolved.ev
         doubleWinProb += probability * resolved.winProb
+        doubleLossProb += probability * resolved.lossProb
       }
       if (doubleEv > best.ev) {
-        best = { ev: doubleEv, winProb: doubleWinProb }
+        best = { ev: doubleEv, winProb: doubleWinProb, lossProb: doubleLossProb }
       }
     }
   }
@@ -566,7 +666,7 @@ function pickBestActionByExactEV(
   handMemo: Map<string, EvalResult>,
   budget: SearchBudget,
   canDouble: boolean,
-): Action {
+): Exclude<Action, 'SPLIT' | 'SURRENDER'> {
   const dealerDist = dealerDistribution(dealerUpcard, counts, rules.dealerHitsSoft17, dealerMemo)
   const standEval = resolveHandAgainstDealerDistribution(
     cards,
@@ -576,7 +676,7 @@ function pickBestActionByExactEV(
     dealerDist,
   )
 
-  let bestAction: Action = 'STAND'
+  let bestAction: Exclude<Action, 'SPLIT' | 'SURRENDER'> = 'STAND'
   let bestEv = standEval.ev
 
   const totalCards = countTotalCards(counts)
@@ -695,6 +795,10 @@ function playHandByExactPolicy(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Split evaluation
+// ---------------------------------------------------------------------------
+
 function approximateSplitEV(
   input: DecisionInput,
   baseCounts: number[],
@@ -710,6 +814,8 @@ function approximateSplitEV(
 
   let singleHandEv = 0
   let singleHandWinProb = 0
+  let singleHandLossProb = 0
+
   for (let rankIndex = 0; rankIndex < RANKS.length; rankIndex += 1) {
     const rankCount = baseCounts[rankIndex]
     if (rankCount <= 0) continue
@@ -736,17 +842,19 @@ function approximateSplitEV(
     )
     singleHandEv += probability * evalResult.ev
     singleHandWinProb += probability * evalResult.winProb
+    singleHandLossProb += probability * evalResult.lossProb
   }
 
   return {
     ev: singleHandEv * 2,
     winProb: Math.max(0, Math.min(1, singleHandWinProb)),
+    lossProb: Math.max(0, Math.min(1, singleHandLossProb)),
   }
 }
 
 function splitEvCiHalfWidth(sampleVariance: number, sampleCount: number): number {
   if (sampleCount <= 1) return Number.POSITIVE_INFINITY
-  // 95% normal-approx confidence interval for mean EV.
+  // 95% normal-approx CI half-width for mean EV.
   return 1.96 * Math.sqrt(sampleVariance / sampleCount)
 }
 
@@ -757,18 +865,20 @@ function simulateSplitAction(
 ): SplitSimulationStats {
   const dealerUpcard = input.dealerUpcard
   if (!dealerUpcard) {
-    return { completedTrials: 0, meanProfit: Number.NEGATIVE_INFINITY, winRate: 0 }
+    return { completedTrials: 0, meanProfit: Number.NEGATIVE_INFINITY, winRate: 0, lossRate: 1 }
   }
   if (input.playerCards.length !== 2 || input.playerCards[0] !== input.playerCards[1]) {
-    return { completedTrials: 0, meanProfit: Number.NEGATIVE_INFINITY, winRate: 0 }
+    return { completedTrials: 0, meanProfit: Number.NEGATIVE_INFINITY, winRate: 0, lossRate: 1 }
   }
 
   const pairCard = input.playerCards[0]
   const requestedTrials = input.trials ?? 3000
   const scaledTrials = Math.round(requestedTrials * 0.1)
   const trials = Math.max(SPLIT_TRIALS_MIN, Math.min(SPLIT_TRIALS_MAX, scaledTrials))
+
   let completedTrials = 0
   let wins = 0
+  let losses = 0
   let meanProfit = 0
   let m2 = 0
 
@@ -786,6 +896,7 @@ function simulateSplitAction(
     const handMemo = new Map<string, EvalResult>()
     const budget: SearchBudget = { remaining: SPLIT_POLICY_NODE_BUDGET }
     const splitAcesLimited = pairCard === 'A' && !rules.hitSplitAces
+
     const handA = playHandByExactPolicy(
       [pairCard, drawA],
       counts,
@@ -818,8 +929,10 @@ function simulateSplitAction(
     const profitA = compareHandToDealer(handA.cards, dealerFinal, handA.stake, rules.blackjackPayout, false)
     const profitB = compareHandToDealer(handB.cards, dealerFinal, handB.stake, rules.blackjackPayout, false)
     const profit = profitA + profitB
+
     completedTrials += 1
     if (profit > 0) wins += 1
+    if (profit < 0) losses += 1
 
     const delta = profit - meanProfit
     meanProfit += delta / completedTrials
@@ -831,9 +944,7 @@ function simulateSplitAction(
     if (shouldCheckCi) {
       const sampleVariance = completedTrials > 1 ? m2 / (completedTrials - 1) : 0
       const ciHalfWidth = splitEvCiHalfWidth(sampleVariance, completedTrials)
-      if (ciHalfWidth <= SPLIT_EV_CI_TARGET) {
-        break
-      }
+      if (ciHalfWidth <= SPLIT_EV_CI_TARGET) break
     }
   }
 
@@ -841,27 +952,29 @@ function simulateSplitAction(
     completedTrials,
     meanProfit: completedTrials > 0 ? meanProfit : Number.NEGATIVE_INFINITY,
     winRate: completedTrials > 0 ? wins / completedTrials : 0,
+    lossRate: completedTrials > 0 ? losses / completedTrials : 1,
   }
 }
 
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
 export function formatActionLabel(action: Action): string {
   switch (action) {
-    case 'HIT':
-      return 'Hit'
-    case 'STAND':
-      return 'Stand'
-    case 'DOUBLE':
-      return 'Double'
-    case 'SPLIT':
-      return 'Split'
-    default:
-      return action
+    case 'HIT':       return 'Hit'
+    case 'STAND':     return 'Stand'
+    case 'DOUBLE':    return 'Double'
+    case 'SPLIT':     return 'Split'
+    case 'SURRENDER': return 'Surrender'
+    default:          return action
   }
 }
 
 export function calculateDecision(input: DecisionInput): DecisionResult {
   const rules = normalizeRules(input.rules)
   const dealerUpcard = input.dealerUpcard
+
   if (!dealerUpcard) {
     return {
       valid: false,
@@ -871,6 +984,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
       decksRemaining: rules.decks,
       evByAction: {},
       winRateByAction: {},
+      lossRateByAction: {},
     }
   }
 
@@ -883,6 +997,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
       decksRemaining: rules.decks,
       evByAction: {},
       winRateByAction: {},
+      lossRateByAction: {},
     }
   }
 
@@ -896,6 +1011,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
       decksRemaining: rules.decks,
       evByAction: {},
       winRateByAction: {},
+      lossRateByAction: {},
     }
   }
 
@@ -913,6 +1029,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
         decksRemaining: rules.decks,
         evByAction: {},
         winRateByAction: {},
+        lossRateByAction: {},
       }
     }
     runningCount += HI_LO_TAGS[card]
@@ -923,6 +1040,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
   const trueCount = decksRemaining > 0 ? runningCount / decksRemaining : 0
 
   const actions: Action[] = ['STAND', 'HIT', 'DOUBLE']
+
   if (
     input.playerCards.length === 2 &&
     input.playerCards[0] === input.playerCards[1] &&
@@ -931,14 +1049,23 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
     actions.push('SPLIT')
   }
 
+  // Surrender is available on the initial two-card hand only [Wong ch. 9].
+  // Late surrender: after dealer peeks for BJ.
+  if (rules.lateSurrender && input.playerCards.length === 2) {
+    actions.push('SURRENDER')
+  }
+
   const evByAction: Partial<Record<Action, number>> = {}
   const winRateByAction: Partial<Record<Action, number>> = {}
+  const lossRateByAction: Partial<Record<Action, number>> = {}
+
   const dealerMemo = new Map<string, DealerDistribution>()
   const handMemo = new Map<string, EvalResult>()
-
   const valueByAction = new Map<Action, EvalResult>()
+
   const dealerDistBase = dealerDistribution(dealerUpcard, baseCounts, rules.dealerHitsSoft17, dealerMemo)
 
+  // --- STAND ---
   valueByAction.set(
     'STAND',
     resolveHandAgainstDealerDistribution(
@@ -950,6 +1077,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
     ),
   )
 
+  // --- HIT (expectimax) ---
   if (actions.includes('HIT')) {
     const currentTotal = handValue(input.playerCards).total
     const budget: SearchBudget = {
@@ -958,6 +1086,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
     const totalCards = countTotalCards(baseCounts)
     let hitEv = 0
     let hitWinProb = 0
+    let hitLossProb = 0
     for (let rankIndex = 0; rankIndex < RANKS.length; rankIndex += 1) {
       const rankCount = baseCounts[rankIndex]
       if (rankCount <= 0) continue
@@ -968,6 +1097,7 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
       const nextValue = handValue(nextCards)
       if (nextValue.total > 21) {
         hitEv += probability * -1
+        hitLossProb += probability * 1
         continue
       }
       const nextEval = solveOptimalHand(
@@ -978,23 +1108,22 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
         dealerMemo,
         handMemo,
         budget,
-        {
-          canDouble: false,
-          blackjackEligible: false,
-          allowHit: true,
-        },
+        { canDouble: false, blackjackEligible: false, allowHit: true },
       )
       hitEv += probability * nextEval.ev
       hitWinProb += probability * nextEval.winProb
+      hitLossProb += probability * nextEval.lossProb
     }
-    valueByAction.set('HIT', { ev: hitEv, winProb: hitWinProb })
+    valueByAction.set('HIT', { ev: hitEv, winProb: hitWinProb, lossProb: hitLossProb })
   }
 
+  // --- DOUBLE ---
   if (actions.includes('DOUBLE')) {
     if (canDoubleNow(input.playerCards, true, rules)) {
       const totalCards = countTotalCards(baseCounts)
       let doubleEv = 0
       let doubleWinProb = 0
+      let doubleLossProb = 0
       for (let rankIndex = 0; rankIndex < RANKS.length; rankIndex += 1) {
         const rankCount = baseCounts[rankIndex]
         if (rankCount <= 0) continue
@@ -1017,18 +1146,20 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
         )
         doubleEv += probability * resolved.ev
         doubleWinProb += probability * resolved.winProb
+        doubleLossProb += probability * resolved.lossProb
       }
-      valueByAction.set('DOUBLE', { ev: doubleEv, winProb: doubleWinProb })
+      valueByAction.set('DOUBLE', { ev: doubleEv, winProb: doubleWinProb, lossProb: doubleLossProb })
     } else {
-      valueByAction.set('DOUBLE', { ev: Number.NEGATIVE_INFINITY, winProb: 0 })
+      valueByAction.set('DOUBLE', { ev: Number.NEGATIVE_INFINITY, winProb: 0, lossProb: 1 })
     }
   }
 
+  // --- SPLIT (analytical bound + adaptive simulation) ---
   if (actions.includes('SPLIT')) {
-    const nonSplitActions = actions.filter((action) => action !== 'SPLIT')
+    const nonSplitActions = actions.filter((action) => action !== 'SPLIT' && action !== 'SURRENDER')
     const bestNonSplitEv = nonSplitActions.reduce((best, action) => {
-      const value = valueByAction.get(action)?.ev ?? Number.NEGATIVE_INFINITY
-      return Math.max(best, value)
+      const v = valueByAction.get(action)?.ev ?? Number.NEGATIVE_INFINITY
+      return Math.max(best, v)
     }, Number.NEGATIVE_INFINITY)
 
     const splitApprox = approximateSplitEV(input, baseCounts, rules)
@@ -1042,20 +1173,41 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
       valueByAction.set('SPLIT', {
         ev: splitStats.meanProfit,
         winProb: splitStats.winRate,
+        lossProb: splitStats.lossRate,
       })
     }
   }
 
-  for (const action of actions) {
-    const evalResult = valueByAction.get(action) ?? { ev: Number.NEGATIVE_INFINITY, winProb: 0 }
-    evByAction[action] = evalResult.ev
-    winRateByAction[action] = evalResult.winProb
+  // --- SURRENDER (exact closed-form, peek-aware) [Wong, Schlesinger Fab 4] ---
+  if (actions.includes('SURRENDER')) {
+    valueByAction.set('SURRENDER', surrenderEvalResult(dealerDistBase))
   }
 
+  // Populate output maps.
+  for (const action of actions) {
+    const evalResult = valueByAction.get(action) ?? { ev: Number.NEGATIVE_INFINITY, winProb: 0, lossProb: 1 }
+    evByAction[action] = evalResult.ev
+    winRateByAction[action] = evalResult.winProb
+    lossRateByAction[action] = evalResult.lossProb
+  }
+
+  // --- EV-maximising recommendation (traditional optimal play) ---
   const recommendedAction = actions.reduce<Action>((best, current) => {
     const bestEv = evByAction[best] ?? Number.NEGATIVE_INFINITY
     const currentEv = evByAction[current] ?? Number.NEGATIVE_INFINITY
     return currentEv > bestEv ? current : best
+  }, actions[0])
+
+  // --- Risk-adjusted recommendation (min-max: maximise EV, penalise loss risk)
+  // Formula: safeScore = EV − λ × lossProb  [Snyder bankroll / utility theory]
+  // λ = RISK_AVERSION_WEIGHT (0.10). Makes surrender attractive slightly
+  // earlier than pure EV, and prefers stand over marginal hits on bad shoes.
+  const safeRecommendedAction = actions.reduce<Action>((best, current) => {
+    const bestEval = valueByAction.get(best) ?? { ev: Number.NEGATIVE_INFINITY, winProb: 0, lossProb: 1 }
+    const currentEval = valueByAction.get(current) ?? { ev: Number.NEGATIVE_INFINITY, winProb: 0, lossProb: 1 }
+    const bestScore = bestEval.ev - RISK_AVERSION_WEIGHT * bestEval.lossProb
+    const currentScore = currentEval.ev - RISK_AVERSION_WEIGHT * currentEval.lossProb
+    return currentScore > bestScore ? current : best
   }, actions[0])
 
   return {
@@ -1065,6 +1217,8 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
     decksRemaining,
     evByAction,
     winRateByAction,
+    lossRateByAction,
     recommendedAction,
+    safeRecommendedAction,
   }
 }

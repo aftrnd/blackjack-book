@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import './App.css'
 import {
+  type Action,
   type DecisionInput,
   type DecisionResult,
   type Rank,
@@ -399,6 +400,7 @@ function App() {
   const [dealerHitsSoft17, setDealerHitsSoft17] = useState<boolean>(false)
   const [doubleAfterSplit, setDoubleAfterSplit] = useState<boolean>(true)
   const [blackjackPayout, setBlackjackPayout] = useState<number>(1.5)
+  const [lateSurrender, setLateSurrender] = useState<boolean>(true)
   const [isPaPresetMode, setIsPaPresetMode] = useState<boolean>(true)
 
   const [trials, setTrials] = useState<number>(2500)
@@ -423,6 +425,7 @@ function App() {
         dealerHitsSoft17,
         doubleAfterSplit,
         blackjackPayout,
+        lateSurrender,
       },
       trials,
     }),
@@ -434,6 +437,7 @@ function App() {
       dealerHitsSoft17,
       doubleAfterSplit,
       blackjackPayout,
+      lateSurrender,
       trials,
     ],
   )
@@ -455,6 +459,7 @@ function App() {
         decksRemaining: decisionInput.rules.decks,
         evByAction: {},
         winRateByAction: {},
+        lossRateByAction: {},
       })
     }
 
@@ -567,8 +572,14 @@ function App() {
         STAND: 'decision-stand',
         DOUBLE: 'decision-double',
         SPLIT: 'decision-split',
+        SURRENDER: 'decision-surrender',
       }[decision.recommendedAction]
     : ''
+  const safeActionLabel = decision.safeRecommendedAction
+    ? formatActionLabel(decision.safeRecommendedAction)
+    : '—'
+  const safeActionDiffersFromEV =
+    decision.safeRecommendedAction !== decision.recommendedAction
   const winRatePercent = Math.max(0, Math.min(100, recommendedWinRate * 100))
   const winRateCircleStyle = {
     '--win-rate-percent': `${winRatePercent}%`,
@@ -592,6 +603,7 @@ function App() {
     setDealerHitsSoft17(false)
     setDoubleAfterSplit(true)
     setBlackjackPayout(1.5)
+    setLateSurrender(true)
     setIsPaPresetMode(true)
   }, [isPaPresetMode])
 
@@ -805,6 +817,14 @@ function App() {
               />
               Double after split (DAS)
             </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={lateSurrender}
+                onChange={(event) => setLateSurrender(event.target.checked)}
+              />
+              Late surrender (LS)
+            </label>
           </div>
         )}
       </section>
@@ -835,10 +855,16 @@ function App() {
                   </div>
                 )}
                 <div>
-                  <strong>Recommended:</strong>{' '}
+                  <strong>Best EV play:</strong>{' '}
                   {decision.recommendedAction
                     ? formatActionLabel(decision.recommendedAction)
                     : '—'}
+                </div>
+                <div className={safeActionDiffersFromEV ? 'safe-action-different' : ''}>
+                  <strong>Safe play:</strong> {safeActionLabel}
+                  {safeActionDiffersFromEV && (
+                    <span className="safe-action-badge">capital protection</span>
+                  )}
                 </div>
                 <div>
                   <strong>Running count:</strong> {decision.runningCount.toFixed(0)}
@@ -854,24 +880,36 @@ function App() {
                 <thead>
                   <tr>
                     <th>Action</th>
-                    <th>Estimated EV (units)</th>
+                    <th>EV</th>
+                    <th>Win%</th>
+                    <th>Loss%</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {actionEntries.map(({ action, ev }) => (
-                    <tr
-                      key={action}
-                      className={decision.recommendedAction === action ? 'recommended' : ''}
-                    >
-                      <td>{formatActionLabel(action as 'HIT' | 'STAND' | 'DOUBLE' | 'SPLIT')}</td>
-                      <td>{ev.toFixed(4)}</td>
-                    </tr>
-                  ))}
+                  {actionEntries.map(({ action, ev }) => {
+                    const winRate = decision.winRateByAction[action as Action] ?? 0
+                    const lossRate = decision.lossRateByAction[action as Action] ?? 0
+                    const isSafeAction = decision.safeRecommendedAction === action
+                    const isEvAction = decision.recommendedAction === action
+                    return (
+                      <tr
+                        key={action}
+                        className={[
+                          isEvAction ? 'recommended' : '',
+                          isSafeAction && !isEvAction ? 'safe-recommended' : '',
+                        ].filter(Boolean).join(' ')}
+                      >
+                        <td>{formatActionLabel(action as Action)}</td>
+                        <td>{ev === Number.NEGATIVE_INFINITY ? '—' : ev.toFixed(4)}</td>
+                        <td>{ev === Number.NEGATIVE_INFINITY ? '—' : `${(winRate * 100).toFixed(1)}%`}</td>
+                        <td>{ev === Number.NEGATIVE_INFINITY ? '—' : `${(lossRate * 100).toFixed(1)}%`}</td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
               <p className="hint">
-                EV uses Monte Carlo simulation from observed shoe composition. Increase trials for
-                smoother values.
+                EV: exact finite-deck expectimax from current shoe. Safe play = EV − 0.10×Loss%, minimising capital exposure.
               </p>
               {isDecisionPending && (
                 <p className="hint">Refreshing exact odds...</p>
