@@ -48,10 +48,6 @@ export type DecisionResult = {
   recommendedAction?: Action
 }
 
-type SimResult = {
-  profit: number
-}
-
 type EvalResult = {
   ev: number
   winProb: number
@@ -76,6 +72,12 @@ type NormalizedRules = {
 
 type SearchBudget = {
   remaining: number
+}
+
+type SplitSimulationStats = {
+  completedTrials: number
+  meanProfit: number
+  winRate: number
 }
 
 const RANK_TO_INDEX: Record<Rank, number> = RANKS.reduce(
@@ -103,7 +105,12 @@ const TEN_RANKS: Rank[] = ['10', 'J', 'Q', 'K']
 const DEALER_TOTALS: Array<17 | 18 | 19 | 20 | 21> = [17, 18, 19, 20, 21]
 const EXACT_NODE_BUDGET_HIGH = 7000
 const EXACT_NODE_BUDGET_LOW_TOTAL = 3500
-const SPLIT_POLICY_NODE_BUDGET = 1200
+const SPLIT_POLICY_NODE_BUDGET = 300
+const SPLIT_TRIALS_MIN = 80
+const SPLIT_TRIALS_MAX = 500
+const SPLIT_BATCH_SIZE = 20
+const SPLIT_EV_CI_TARGET = 0.03
+const SPLIT_PRUNE_MARGIN = 0.05
 
 function rankValue(rank: Rank): number {
   if (rank === 'A') return 11
@@ -688,18 +695,82 @@ function playHandByExactPolicy(
   }
 }
 
+function approximateSplitEV(
+  input: DecisionInput,
+  baseCounts: number[],
+  rules: NormalizedRules,
+): EvalResult | null {
+  const dealerUpcard = input.dealerUpcard
+  if (!dealerUpcard) return null
+  if (input.playerCards.length !== 2 || input.playerCards[0] !== input.playerCards[1]) return null
+
+  const pairCard = input.playerCards[0]
+  const totalCards = countTotalCards(baseCounts)
+  if (totalCards <= 0) return null
+
+  let singleHandEv = 0
+  let singleHandWinProb = 0
+  for (let rankIndex = 0; rankIndex < RANKS.length; rankIndex += 1) {
+    const rankCount = baseCounts[rankIndex]
+    if (rankCount <= 0) continue
+    const probability = rankCount / totalCards
+    const nextCounts = cloneCounts(baseCounts)
+    nextCounts[rankIndex] -= 1
+    const dealerMemo = new Map<string, DealerDistribution>()
+    const handMemo = new Map<string, EvalResult>()
+    const budget: SearchBudget = { remaining: SPLIT_POLICY_NODE_BUDGET }
+    const splitAcesLimited = pairCard === 'A' && !rules.hitSplitAces
+    const evalResult = solveOptimalHand(
+      [pairCard, RANKS[rankIndex]],
+      nextCounts,
+      dealerUpcard,
+      rules,
+      dealerMemo,
+      handMemo,
+      budget,
+      {
+        canDouble: rules.doubleAfterSplit,
+        blackjackEligible: false,
+        allowHit: !splitAcesLimited,
+      },
+    )
+    singleHandEv += probability * evalResult.ev
+    singleHandWinProb += probability * evalResult.winProb
+  }
+
+  return {
+    ev: singleHandEv * 2,
+    winProb: Math.max(0, Math.min(1, singleHandWinProb)),
+  }
+}
+
+function splitEvCiHalfWidth(sampleVariance: number, sampleCount: number): number {
+  if (sampleCount <= 1) return Number.POSITIVE_INFINITY
+  // 95% normal-approx confidence interval for mean EV.
+  return 1.96 * Math.sqrt(sampleVariance / sampleCount)
+}
+
 function simulateSplitAction(
   input: DecisionInput,
   baseCounts: number[],
   rules: NormalizedRules,
-): SimResult[] {
+): SplitSimulationStats {
   const dealerUpcard = input.dealerUpcard
-  if (!dealerUpcard) return []
-  if (input.playerCards.length !== 2 || input.playerCards[0] !== input.playerCards[1]) return []
+  if (!dealerUpcard) {
+    return { completedTrials: 0, meanProfit: Number.NEGATIVE_INFINITY, winRate: 0 }
+  }
+  if (input.playerCards.length !== 2 || input.playerCards[0] !== input.playerCards[1]) {
+    return { completedTrials: 0, meanProfit: Number.NEGATIVE_INFINITY, winRate: 0 }
+  }
 
   const pairCard = input.playerCards[0]
-  const trials = Math.max(1000, input.trials ?? 3000)
-  const outcomes: SimResult[] = []
+  const requestedTrials = input.trials ?? 3000
+  const scaledTrials = Math.round(requestedTrials * 0.1)
+  const trials = Math.max(SPLIT_TRIALS_MIN, Math.min(SPLIT_TRIALS_MAX, scaledTrials))
+  let completedTrials = 0
+  let wins = 0
+  let meanProfit = 0
+  let m2 = 0
 
   for (let i = 0; i < trials; i += 1) {
     const counts = cloneCounts(baseCounts)
@@ -746,15 +817,31 @@ function simulateSplitAction(
 
     const profitA = compareHandToDealer(handA.cards, dealerFinal, handA.stake, rules.blackjackPayout, false)
     const profitB = compareHandToDealer(handB.cards, dealerFinal, handB.stake, rules.blackjackPayout, false)
-    outcomes.push({ profit: profitA + profitB })
+    const profit = profitA + profitB
+    completedTrials += 1
+    if (profit > 0) wins += 1
+
+    const delta = profit - meanProfit
+    meanProfit += delta / completedTrials
+    const delta2 = profit - meanProfit
+    m2 += delta * delta2
+
+    const shouldCheckCi =
+      completedTrials >= SPLIT_TRIALS_MIN && completedTrials % SPLIT_BATCH_SIZE === 0
+    if (shouldCheckCi) {
+      const sampleVariance = completedTrials > 1 ? m2 / (completedTrials - 1) : 0
+      const ciHalfWidth = splitEvCiHalfWidth(sampleVariance, completedTrials)
+      if (ciHalfWidth <= SPLIT_EV_CI_TARGET) {
+        break
+      }
+    }
   }
 
-  return outcomes
-}
-
-function average(values: number[]): number {
-  if (!values.length) return 0
-  return values.reduce((sum, value) => sum + value, 0) / values.length
+  return {
+    completedTrials,
+    meanProfit: completedTrials > 0 ? meanProfit : Number.NEGATIVE_INFINITY,
+    winRate: completedTrials > 0 ? wins / completedTrials : 0,
+  }
 }
 
 export function formatActionLabel(action: Action): string {
@@ -925,13 +1012,25 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
   }
 
   if (actions.includes('SPLIT')) {
-    const splitOutcomes = simulateSplitAction(input, baseCounts, rules)
-    const profits = splitOutcomes.map((result) => result.profit)
-    const wins = splitOutcomes.filter((result) => result.profit > 0).length
-    valueByAction.set('SPLIT', {
-      ev: average(profits),
-      winProb: splitOutcomes.length > 0 ? wins / splitOutcomes.length : 0,
-    })
+    const nonSplitActions = actions.filter((action) => action !== 'SPLIT')
+    const bestNonSplitEv = nonSplitActions.reduce((best, action) => {
+      const value = valueByAction.get(action)?.ev ?? Number.NEGATIVE_INFINITY
+      return Math.max(best, value)
+    }, Number.NEGATIVE_INFINITY)
+
+    const splitApprox = approximateSplitEV(input, baseCounts, rules)
+    const shouldPruneHeavySplitSimulation =
+      splitApprox !== null && splitApprox.ev + SPLIT_PRUNE_MARGIN < bestNonSplitEv
+
+    if (shouldPruneHeavySplitSimulation && splitApprox) {
+      valueByAction.set('SPLIT', splitApprox)
+    } else {
+      const splitStats = simulateSplitAction(input, baseCounts, rules)
+      valueByAction.set('SPLIT', {
+        ev: splitStats.meanProfit,
+        winProb: splitStats.winRate,
+      })
+    }
   }
 
   for (const action of actions) {

@@ -1,4 +1,4 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useReducer, useState } from 'react'
+import { type CSSProperties, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import {
   ChevronsLeftRight,
   ChevronsRight,
@@ -380,8 +380,12 @@ function App() {
     cards: [],
     doubled: false,
   }
-  const seenCardsFromOtherPlayerHands = hands.playerHands.flatMap((hand, index) =>
-    index === hands.activePlayerHandIndex ? [] : hand.cards,
+  const seenCardsFromOtherPlayerHands = useMemo(
+    () =>
+      hands.playerHands.flatMap((hand, index) =>
+        index === hands.activePlayerHandIndex ? [] : hand.cards,
+      ),
+    [hands.playerHands, hands.activePlayerHandIndex],
   )
   const decisionInput = useMemo<DecisionInput>(
     () => ({
@@ -408,23 +412,38 @@ function App() {
     ],
   )
   const [decision, setDecision] = useState<DecisionResult>(() => calculateDecision(decisionInput))
+  const [isDecisionPending, setIsDecisionPending] = useState<boolean>(false)
+  const latestDecisionRequestId = useRef<number>(0)
 
   useEffect(() => {
-    let cancelled = false
+    const requestId = latestDecisionRequestId.current + 1
+    latestDecisionRequestId.current = requestId
+    setIsDecisionPending(true)
+
+    if (decisionInput.playerCards.length >= 2 && decisionInput.dealerUpcard) {
+      setDecision({
+        valid: false,
+        message: 'Calculating exact odds...',
+        runningCount: 0,
+        trueCount: 0,
+        decksRemaining: decisionInput.rules.decks,
+        evByAction: {},
+        winRateByAction: {},
+      })
+    }
+
     calculateDecisionAsync(decisionInput)
       .then((result) => {
-        if (cancelled) return
+        if (latestDecisionRequestId.current !== requestId) return
         setDecision(result)
+        setIsDecisionPending(false)
       })
       .catch(() => {
-        if (cancelled) return
+        if (latestDecisionRequestId.current !== requestId) return
         // Worker failures fall back to direct compute to preserve functionality.
         setDecision(calculateDecision(decisionInput))
+        setIsDecisionPending(false)
       })
-
-    return () => {
-      cancelled = true
-    }
   }, [decisionInput])
 
   const addCard = useCallback((rank: Rank): void => {
@@ -805,6 +824,9 @@ function App() {
                 EV uses Monte Carlo simulation from observed shoe composition. Increase trials for
                 smoother values.
               </p>
+              {isDecisionPending && (
+                <p className="hint">Refreshing exact odds...</p>
+              )}
             </div>
             <aside className="output-side">
               <div className={`decision-callout ${decisionToneClass}`}>
