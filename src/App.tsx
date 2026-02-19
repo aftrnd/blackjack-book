@@ -9,6 +9,8 @@ import {
 } from 'lucide-react'
 import './App.css'
 import {
+  type DecisionInput,
+  type DecisionResult,
   type Rank,
   RANKS,
   calculateDecision,
@@ -45,12 +47,49 @@ type HandsAction =
   | { type: 'DOUBLE_ACTIVE_HAND' }
   | { type: 'SET_ACTIVE_PLAYER_HAND'; index: number }
 
+type DecisionWorkerRequest = {
+  id: number
+  input: DecisionInput
+}
+
+type DecisionWorkerResponse = {
+  id: number
+  result: DecisionResult
+}
+
 const INITIAL_HANDS_STATE: HandsState = {
   playerHands: [{ cards: [], doubled: false }],
   dealerCards: [],
   activePlayerHandIndex: 0,
   history: [],
   future: [],
+}
+
+let decisionWorker: Worker | null = null
+let nextDecisionRequestId = 1
+const pendingDecisionRequests = new Map<number, (result: DecisionResult) => void>()
+
+function getDecisionWorker(): Worker {
+  if (!decisionWorker) {
+    decisionWorker = new Worker(new URL('./lib/decisionWorker.ts', import.meta.url), { type: 'module' })
+    decisionWorker.onmessage = (event: MessageEvent<DecisionWorkerResponse>) => {
+      const resolver = pendingDecisionRequests.get(event.data.id)
+      if (!resolver) return
+      pendingDecisionRequests.delete(event.data.id)
+      resolver(event.data.result)
+    }
+  }
+  return decisionWorker
+}
+
+function calculateDecisionAsync(input: DecisionInput): Promise<DecisionResult> {
+  return new Promise((resolve) => {
+    const id = nextDecisionRequestId
+    nextDecisionRequestId += 1
+    pendingDecisionRequests.set(id, resolve)
+    const message: DecisionWorkerRequest = { id, input }
+    getDecisionWorker().postMessage(message)
+  })
 }
 
 function clonePlayerHand(hand: PlayerHand): PlayerHand {
@@ -344,21 +383,19 @@ function App() {
   const seenCardsFromOtherPlayerHands = hands.playerHands.flatMap((hand, index) =>
     index === hands.activePlayerHandIndex ? [] : hand.cards,
   )
-
-  const decision = useMemo(
-    () =>
-      calculateDecision({
-        playerCards: activePlayerHand.cards,
-        dealerUpcard: hands.dealerCards[0] ?? null,
-        tableSeenCards: [...hands.dealerCards.slice(1), ...seenCardsFromOtherPlayerHands],
-        rules: {
-          decks,
-          dealerHitsSoft17,
-          doubleAfterSplit,
-          blackjackPayout,
-        },
-        trials,
-      }),
+  const decisionInput = useMemo<DecisionInput>(
+    () => ({
+      playerCards: [...activePlayerHand.cards],
+      dealerUpcard: hands.dealerCards[0] ?? null,
+      tableSeenCards: [...hands.dealerCards.slice(1), ...seenCardsFromOtherPlayerHands],
+      rules: {
+        decks,
+        dealerHitsSoft17,
+        doubleAfterSplit,
+        blackjackPayout,
+      },
+      trials,
+    }),
     [
       activePlayerHand.cards,
       seenCardsFromOtherPlayerHands,
@@ -370,6 +407,25 @@ function App() {
       trials,
     ],
   )
+  const [decision, setDecision] = useState<DecisionResult>(() => calculateDecision(decisionInput))
+
+  useEffect(() => {
+    let cancelled = false
+    calculateDecisionAsync(decisionInput)
+      .then((result) => {
+        if (cancelled) return
+        setDecision(result)
+      })
+      .catch(() => {
+        if (cancelled) return
+        // Worker failures fall back to direct compute to preserve functionality.
+        setDecision(calculateDecision(decisionInput))
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [decisionInput])
 
   const addCard = useCallback((rank: Rank): void => {
     const shouldAutoSwitchToDealer =
