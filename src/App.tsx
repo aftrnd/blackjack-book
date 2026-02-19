@@ -523,6 +523,7 @@ function App() {
   }, [])
   const setActivePlayerHand = useCallback((index: number): void => {
     dispatchHands({ type: 'SET_ACTIVE_PLAYER_HAND', index })
+    setActiveTarget('player')
   }, [])
   const removePlayerCardAt = useCallback((handIndex: number, cardIndex: number): void => {
     dispatchHands({ type: 'REMOVE_PLAYER_CARD_AT', handIndex, cardIndex })
@@ -698,22 +699,20 @@ function App() {
             {hands.playerHands.map((hand, index) => (
               <div
                 key={`hand-${index}`}
+                role="button"
+                tabIndex={0}
                 className={`player-hand ${
                   hands.playerHands.length > 1 && index === hands.activePlayerHandIndex
                     ? 'active'
                     : ''
-                }`}
+                } ${hands.playerHands.length > 1 ? 'player-hand-selectable' : ''}`}
+                onClick={() => hands.playerHands.length > 1 && setActivePlayerHand(index)}
+                onKeyDown={(e) => e.key === 'Enter' && hands.playerHands.length > 1 && setActivePlayerHand(index)}
               >
-                <button
-                  type="button"
-                  className="player-hand-select"
-                  onClick={() => setActivePlayerHand(index)}
-                >
-                  <div className="player-hand-head">
-                    <span className="eyebrow-label">Hand {index + 1}</span>
-                    <span>Total: {hand.cards.length ? getHandTotal(hand.cards) : '—'}</span>
-                  </div>
-                </button>
+                <div className="player-hand-head">
+                  <span className="eyebrow-label">Hand {index + 1}</span>
+                  <span>Total: {hand.cards.length ? getHandTotal(hand.cards) : '—'}</span>
+                </div>
                 <div className="hand-tags">
                   {hands.playerHands.length > 1 && (
                     <div className="hand-tag split">
@@ -731,7 +730,9 @@ function App() {
                 <HandCards
                   cards={hand.cards}
                   emptyLabel="Add player cards"
-                  onRemoveCard={(cardIndex) => removePlayerCardAt(index, cardIndex)}
+                  onRemoveCard={(cardIndex) => {
+                    removePlayerCardAt(index, cardIndex)
+                  }}
                 />
               </div>
             ))}
@@ -942,7 +943,7 @@ function App() {
         )}
       </section>
       <footer className="app-footer">
-        <span>v1.1.0 ©Nick Jackson</span>
+        <span>v1.2.0 ©Nick Jackson</span>
       </footer>
     </main>
   )
