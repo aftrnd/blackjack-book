@@ -886,6 +886,19 @@ export function calculateDecision(input: DecisionInput): DecisionResult {
     }
   }
 
+  const playerValue = handValue(input.playerCards)
+  if (playerValue.total > 21) {
+    return {
+      valid: false,
+      message: 'Player bust. Hand is over.',
+      runningCount: 0,
+      trueCount: 0,
+      decksRemaining: rules.decks,
+      evByAction: {},
+      winRateByAction: {},
+    }
+  }
+
   const observed = [...input.playerCards, dealerUpcard, ...input.tableSeenCards]
   const baseCounts = toShoeCounts(rules.decks)
   let runningCount = 0

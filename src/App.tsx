@@ -365,6 +365,32 @@ function getHandTotal(cards: Rank[]): number {
   return total
 }
 
+function isBlackjackHand(cards: Rank[]): boolean {
+  if (cards.length !== 2) return false
+  const hasAce = cards.includes('A')
+  const hasTenValue = cards.some((card) => card === '10' || card === 'J' || card === 'Q' || card === 'K')
+  return hasAce && hasTenValue
+}
+
+function resolveHandOutcome(playerCards: Rank[], dealerCards: Rank[]): 'PLAYER WIN' | 'DEALER WIN' | 'PUSH' | null {
+  if (playerCards.length < 2 || dealerCards.length < 2) return null
+
+  const playerTotal = getHandTotal(playerCards)
+  const dealerTotal = getHandTotal(dealerCards)
+
+  if (playerTotal > 21) return 'DEALER WIN'
+  if (dealerTotal > 21) return 'PLAYER WIN'
+
+  const playerBlackjack = isBlackjackHand(playerCards)
+  const dealerBlackjack = isBlackjackHand(dealerCards)
+  if (playerBlackjack && !dealerBlackjack) return 'PLAYER WIN'
+  if (dealerBlackjack && !playerBlackjack) return 'DEALER WIN'
+
+  if (playerTotal > dealerTotal) return 'PLAYER WIN'
+  if (dealerTotal > playerTotal) return 'DEALER WIN'
+  return 'PUSH'
+}
+
 function App() {
   const [activeTarget, setActiveTarget] = useState<Target>('player')
   const [hands, dispatchHands] = useReducer(handsReducer, INITIAL_HANDS_STATE)
@@ -547,6 +573,15 @@ function App() {
   const winRateCircleStyle = {
     '--win-rate-percent': `${winRatePercent}%`,
   } as CSSProperties
+  const handOutcome = resolveHandOutcome(activePlayerHand.cards, hands.dealerCards)
+  const handOutcomeToneClass = handOutcome
+    ? {
+        'PLAYER WIN': 'outcome-player-win',
+        'DEALER WIN': 'outcome-dealer-win',
+        PUSH: 'outcome-push',
+      }[handOutcome]
+    : ''
+  const isBustState = !decision.valid && decision.message?.toLowerCase().includes('bust')
 
   const applyPaOnlinePreset = useCallback((): void => {
     if (isPaPresetMode) {
@@ -654,7 +689,7 @@ function App() {
                   onClick={() => setActivePlayerHand(index)}
                 >
                   <div className="player-hand-head">
-                    <span>Hand {index + 1}</span>
+                    <span className="eyebrow-label">Hand {index + 1}</span>
                     <span>Total: {hand.cards.length ? getHandTotal(hand.cards) : '—'}</span>
                   </div>
                 </button>
@@ -778,13 +813,27 @@ function App() {
         {!decision.valid ? (
           <>
             <h2>Decision Output</h2>
-            <p>{decision.message}</p>
+            <div className={`status-callout ${isBustState ? 'status-callout-bust' : ''}`}>
+              <div className="status-label">{isBustState ? 'Hand Complete' : 'Status'}</div>
+              <p className="status-message">{decision.message}</p>
+              {handOutcome && (
+                <div className={`status-result ${handOutcomeToneClass}`}>
+                  <span>Result</span>
+                  <strong>{handOutcome}</strong>
+                </div>
+              )}
+            </div>
           </>
         ) : (
           <div className="output-layout">
             <div className="output-main">
               <h2>Decision Output</h2>
               <div className="stats">
+                {handOutcome && (
+                  <div className={`stats-result ${handOutcomeToneClass}`}>
+                    <strong>Hand result:</strong> {handOutcome}
+                  </div>
+                )}
                 <div>
                   <strong>Recommended:</strong>{' '}
                   {decision.recommendedAction

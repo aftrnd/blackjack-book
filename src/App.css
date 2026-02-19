@@ -190,6 +190,92 @@
   line-height: 1.4;
 }
 
+.status-callout {
+  border: 1px solid #334868;
+  background: linear-gradient(180deg, #121c2f 0%, #0f1728 100%);
+  border-radius: 12px;
+  padding: 0.85rem 0.9rem;
+  margin-top: 0.5rem;
+}
+
+.status-callout-bust {
+  border-color: #a64652;
+  background: linear-gradient(180deg, #3f161c 0%, #311217 100%);
+}
+
+.eyebrow-label,
+.status-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #9fb5d8;
+  font-weight: 700;
+}
+
+.status-label {
+  margin-bottom: 0.3rem;
+}
+
+.status-message {
+  margin: 0;
+  font-size: 0.98rem;
+  color: #f0f5ff;
+}
+
+.status-result {
+  margin-top: 0.7rem;
+  border-top: 1px solid rgba(151, 175, 216, 0.3);
+  padding-top: 0.6rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-result span {
+  color: #a9bbd7;
+  font-size: 0.84rem;
+}
+
+.status-result strong {
+  font-size: 0.9rem;
+  letter-spacing: 0.03em;
+}
+
+.outcome-player-win strong {
+  color: #9bffc2;
+}
+
+.outcome-dealer-win strong {
+  color: #ffb8c0;
+}
+
+.outcome-push strong {
+  color: #f7df9a;
+}
+
+.stats-result {
+  border: 1px solid #355077;
+  border-radius: 8px;
+  padding: 0.45rem 0.6rem;
+  background: #12203a;
+}
+
+.stats-result.outcome-player-win {
+  border-color: #2e8f4e;
+  background: #153221;
+}
+
+.stats-result.outcome-dealer-win {
+  border-color: #974753;
+  background: #3a1a20;
+}
+
+.stats-result.outcome-push {
+  border-color: #a68a44;
+  background: #3a3119;
+}
+
 .hotkeys {
   margin-top: 0.75rem;
 }
