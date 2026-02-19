@@ -623,9 +623,6 @@ function App() {
     <main className="app">
       <header className="top">
         <h1>Blackjack Book</h1>
-        <p>
-          By Nick Jackson
-        </p>
       </header>
 
       <section className="panel controls">
@@ -944,6 +941,9 @@ function App() {
           </div>
         )}
       </section>
+      <footer className="app-footer">
+        <span>v1.0.0 ©Nick Jackson</span>
+      </footer>
     </main>
   )
 }
