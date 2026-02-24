@@ -1,18 +1,24 @@
 .app {
-  max-width: 1080px;
+  max-width: 1200px;
   margin: 0 auto;
   padding: 1.5rem;
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr 1fr 420px;
+  grid-template-areas:
+    "top      top      top"
+    "controls controls sidebar"
+    "state    rules    sidebar"
+    "output   output   sidebar"
+    "footer   footer   footer";
 }
 
 .top {
-  grid-column: 1 / -1;
+  grid-area: top;
 }
 
 .app-footer {
-  grid-column: 1 / -1;
+  grid-area: footer;
   display: flex;
   justify-content: flex-start;
   padding-top: 0.25rem;
@@ -89,10 +95,10 @@
   font-size: 0.85rem;
 }
 
-.controls,
-.output {
-  grid-column: 1 / -1;
-}
+.controls { grid-area: controls; }
+.state    { grid-area: state; }
+.rules    { grid-area: rules; }
+.output   { grid-area: output; }
 
 .target-switch {
   position: relative;
@@ -651,9 +657,403 @@ tr.safe-recommended td {
   vertical-align: middle;
 }
 
+/* ── Session Tracker ── */
+
+.session-tracker {
+  grid-area: sidebar;
+  align-self: start;
+}
+
+.session-tracker-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  margin-bottom: 0.85rem;
+}
+
+.session-tracker-header h2 {
+  margin: 0;
+}
+
+.session-tracker-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.session-tracker-actions .icon-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-weight: 600;
+}
+
+.session-add-win {
+  border-color: #2e8f4e;
+  background: #153221;
+  color: #9bffc2;
+}
+
+.session-add-win:hover {
+  border-color: #3dcf75;
+  background: #1b4229;
+}
+
+.session-add-loss {
+  border-color: #8f2a2a;
+  background: #3a1414;
+  color: #ffd7d7;
+}
+
+.session-add-loss:hover {
+  border-color: #cf4a4a;
+  background: #4f1a1a;
+}
+
+.session-add-push {
+  border-color: #a68a44;
+  background: #3a3119;
+  color: #f7df9a;
+  font-weight: 600;
+}
+
+.session-add-push:hover {
+  border-color: #c9a84c;
+  background: #47391f;
+}
+
+.session-tracker-actions .danger {
+  border-color: #8f2a2a;
+  background: #3a1414;
+  color: #ffd7d7;
+}
+
+.session-tracker-actions .danger:hover:not(:disabled) {
+  border-color: #cf4a4a;
+  background: #4f1a1a;
+}
+
+.session-tracker-actions .danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.session-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 1rem;
+}
+
+.session-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.2rem;
+  padding: 0.6rem 0.5rem;
+  border-radius: 10px;
+  border: 1px solid #24304a;
+  background: #0c111c;
+}
+
+.session-stat-win {
+  border-color: #2e8f4e;
+  background: #0e2118;
+}
+
+.session-stat-loss {
+  border-color: #8f2a2a;
+  background: #1f0d0d;
+}
+
+.session-stat-push {
+  border-color: #a68a44;
+  background: #1f1a0d;
+}
+
+.session-stat-value {
+  font-size: 1.45rem;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.session-stat-win .session-stat-value {
+  color: #9bffc2;
+}
+
+.session-stat-loss .session-stat-value {
+  color: #ffb8c0;
+}
+
+.session-stat-push .session-stat-value {
+  color: #f7df9a;
+}
+
+.session-stat-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #7a8aaa;
+  font-weight: 600;
+}
+
+/* ── Session Chart ── */
+
+.session-chart-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  min-height: 220px;
+}
+
+.session-chart-empty .hint {
+  margin: 0;
+  text-align: center;
+  font-size: 0.85rem;
+  color: #56688a;
+  line-height: 1.5;
+  max-width: 240px;
+}
+
+.session-chart-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  border-radius: 10px;
+  border: 1px solid #1e2d47;
+  background: #0c111c;
+  padding: 0.85rem 0.85rem 0.65rem;
+}
+
+.session-chart-inner {
+  display: flex;
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.chart-y-axis {
+  /* width set via inline style to match CHART_Y_AXIS_W constant */
+  flex-shrink: 0;
+  position: relative;
+  pointer-events: none;
+  user-select: none;
+  overflow: visible;
+}
+
+.chart-y-tick {
+  position: absolute;
+  right: 5px;
+  /* top set via inline style in px — perfectly aligned to SVG pixel coords */
+  font-size: 0.64rem;
+  color: #56688a;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  line-height: 1;
+}
+
+.chart-y-zero {
+  color: #8a9dbf;
+  font-weight: 600;
+}
+
+.chart-scroll-area {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.chart-scroll-area::-webkit-scrollbar {
+  height: 4px;
+}
+
+.chart-scroll-area::-webkit-scrollbar-track {
+  background: #0c111c;
+}
+
+.chart-scroll-area::-webkit-scrollbar-thumb {
+  background: #2a3b5b;
+  border-radius: 2px;
+}
+
+.session-chart-svg {
+  display: block;
+  /* width and height set via inline style */
+}
+
+.chart-gridline {
+  stroke: #1a2438;
+  stroke-width: 1;
+}
+
+.chart-zero-line {
+  stroke: #2e4268;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 3;
+}
+
+.chart-area-win {
+  fill: rgba(61, 207, 117, 0.12);
+}
+
+.chart-area-loss {
+  fill: rgba(240, 110, 122, 0.12);
+}
+
+.chart-line {
+  fill: none;
+  stroke: #4a84e8;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.chart-dot {
+  stroke-width: 1.5;
+}
+
+.chart-dot-win {
+  fill: #3dcf75;
+  stroke: #1b5e35;
+}
+
+.chart-dot-loss {
+  fill: #f06e7a;
+  stroke: #7a2030;
+}
+
+.chart-dot-push {
+  fill: #f7df9a;
+  stroke: #7a6530;
+}
+
+.chart-x-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.65rem;
+  color: #56688a;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  padding: 3px 0 0;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem 1rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid #1a2438;
+  margin-top: 0.2rem;
+}
+
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  color: #8a9dbf;
+}
+
+.chart-legend-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid transparent;
+  flex-shrink: 0;
+}
+
+.chart-legend-swatch-win-area {
+  background: rgba(61, 207, 117, 0.2);
+  border-color: rgba(61, 207, 117, 0.4);
+}
+
+.chart-legend-swatch-loss-area {
+  background: rgba(240, 110, 122, 0.2);
+  border-color: rgba(240, 110, 122, 0.4);
+}
+
+.chart-legend-dot-icon {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border-width: 1.5px;
+  border-style: solid;
+  flex-shrink: 0;
+}
+
+.chart-legend-dot-win {
+  background: #3dcf75;
+  border-color: #1b5e35;
+}
+
+.chart-legend-dot-loss {
+  background: #f06e7a;
+  border-color: #7a2030;
+}
+
+.chart-legend-dot-push {
+  background: #f7df9a;
+  border-color: #7a6530;
+}
+
+/* ── Result Strip ── */
+
+.result-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding-top: 0.55rem;
+  border-top: 1px solid #1a2438;
+  max-height: 60px;
+  overflow-y: auto;
+}
+
+.result-pip {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  cursor: default;
+  transition: transform 0.1s ease;
+}
+
+.result-pip:hover {
+  transform: scale(1.4);
+  z-index: 1;
+  position: relative;
+}
+
+.result-pip-win {
+  background: #3dcf75;
+}
+
+.result-pip-loss {
+  background: #f06e7a;
+}
+
+.result-pip-push {
+  background: #f7df9a;
+}
+
 @media (max-width: 820px) {
   .app {
     grid-template-columns: 1fr;
+    grid-template-areas:
+      "top"
+      "controls"
+      "state"
+      "rules"
+      "output"
+      "sidebar"
+      "footer";
   }
 
   .rule-grid,
@@ -698,5 +1098,9 @@ tr.safe-recommended td {
   .rules-header {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .session-tracker-actions {
+    justify-content: flex-start;
   }
 }

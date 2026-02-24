@@ -4,6 +4,8 @@ import {
   ChevronsRight,
   CircleDollarSign,
   GitBranch,
+  Minus,
+  Plus,
   User,
   X,
 } from 'lucide-react'
@@ -392,6 +394,212 @@ function resolveHandOutcome(playerCards: Rank[], dealerCards: Rank[]): 'PLAYER W
   return 'PUSH'
 }
 
+type SessionResult = 'win' | 'loss' | 'push'
+
+
+const CHART_H = 220   // rendered + viewBox height (1:1 so circles stay circular)
+const CHART_Y_AXIS_W = 38
+const DOT_R = 4
+
+function SessionChart({ results }: { results: SessionResult[] }) {
+  // One ref serves both scrolling and width measurement.
+  // It lives on the scroll area which is ALWAYS in the DOM, so the
+  // ResizeObserver fires correctly even after a clear/re-add cycle.
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [scrollW, setScrollW] = useState(300)
+
+  // useLayoutEffect fires synchronously after DOM paint — the very first
+  // rendered frame already has the correct width, no flicker.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el) return
+    setScrollW(el.offsetWidth)
+    const ro = new ResizeObserver(() => {
+      if (scrollRef.current) setScrollW(scrollRef.current.offsetWidth)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // Auto-scroll to the newest (rightmost) entry.
+  useEffect(() => {
+    if (scrollRef.current) scrollRef.current.scrollLeft = scrollRef.current.scrollWidth
+  }, [results.length])
+
+  // ── chart maths ──────────────────────────────────────────────────────────
+  const nets: number[] = []
+  let run = 0
+  for (const r of results) {
+    run += r === 'win' ? 1 : r === 'loss' ? -1 : 0
+    nets.push(run)
+  }
+
+  const rawMin = nets.length ? Math.min(0, ...nets) : 0
+  const rawMax = nets.length ? Math.max(0, ...nets) : 0
+  const yPad  = Math.max(1, (rawMax - rawMin) * 0.15)
+  const minY  = rawMin - yPad
+  const maxY  = rawMax + yPad
+  const ySpan = maxY - minY                         // always > 0
+
+  // SVG pixel width = viewBox width → X-scale = 1, circles stay circular.
+  // Each hand gets ≥ 24 px; expands beyond scrollW to activate scroll.
+  const VW = Math.max(nets.length * 24, scrollW, 200)
+  const VH = CHART_H
+
+  const xPad = DOT_R                                // edge dots sit flush
+  const toX = (i: number) =>
+    nets.length <= 1
+      ? VW / 2
+      : xPad + (i / (nets.length - 1)) * (VW - xPad * 2)
+  const toY  = (v: number) => VH - ((v - minY) / ySpan) * VH
+  const z0   = toY(0)                               // pixel-Y of the zero line
+
+  const linePath = nets
+    .map((v, i) => `${i === 0 ? 'M' : 'L'}${toX(i).toFixed(1)},${toY(v).toFixed(1)}`)
+    .join(' ')
+
+  const areaPath = nets.length
+    ? [
+        `M${toX(0).toFixed(1)},${z0.toFixed(1)}`,
+        ...nets.map((v, i) => `L${toX(i).toFixed(1)},${toY(v).toFixed(1)}`),
+        `L${toX(nets.length - 1).toFixed(1)},${z0.toFixed(1)}`,
+        'Z',
+      ].join(' ')
+    : ''
+
+  // Y-axis ticks: only values inside the visible range
+  const ticks: number[] = []
+  if (nets.length) {
+    const step = Math.max(1, Math.round((rawMax - rawMin + 2) / 5))
+    for (let t = 0; t <= rawMax; t += step) ticks.push(t)
+    for (let t = -step; t >= rawMin; t -= step) ticks.push(t)
+    if (!ticks.includes(0)) ticks.push(0)
+  }
+
+  return (
+    <div className="session-chart-wrap">
+      <div className="session-chart-inner">
+
+        {/* ── pinned Y-axis — only when there's data, so empty state spans full width ── */}
+        {results.length > 0 && (
+          <div
+            className="chart-y-axis"
+            aria-hidden="true"
+            style={{ width: CHART_Y_AXIS_W, height: VH }}
+          >
+            {ticks.map((t) => (
+              <div
+                key={t}
+                className={`chart-y-tick${t === 0 ? ' chart-y-zero' : ''}`}
+                style={{ top: toY(t), transform: 'translateY(-50%)' }}
+              >
+                {t > 0 ? `+${t}` : t}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── scrollable chart area (ref ALWAYS mounted) ── */}
+        <div ref={scrollRef} className="chart-scroll-area">
+          {results.length === 0 ? (
+            <div className="session-chart-empty">
+              <p className="hint">No hands recorded yet — complete a hand and clear, or use the + / − buttons above.</p>
+            </div>
+          ) : (
+            <>
+              <svg
+                width={VW}
+                height={VH}
+                viewBox={`0 0 ${VW} ${VH}`}
+                style={{ display: 'block' }}
+                aria-label="Cumulative net wins/losses chart"
+              >
+                <defs>
+                  <clipPath id="chart-clip-above">
+                    <rect x={0} y={0} width={VW} height={Math.max(0, z0)} />
+                  </clipPath>
+                  <clipPath id="chart-clip-below">
+                    <rect x={0} y={Math.max(0, z0)} width={VW} height={Math.max(0, VH - z0)} />
+                  </clipPath>
+                </defs>
+
+                {ticks.map((t) => (
+                  <line
+                    key={t}
+                    x1={0} y1={toY(t)} x2={VW} y2={toY(t)}
+                    className={t === 0 ? 'chart-zero-line' : 'chart-gridline'}
+                  />
+                ))}
+
+                <path d={areaPath} className="chart-area-win"  clipPath="url(#chart-clip-above)" />
+                <path d={areaPath} className="chart-area-loss" clipPath="url(#chart-clip-below)" />
+
+                {nets.length > 1 && <path d={linePath} className="chart-line" />}
+
+                {nets.map((v, i) => (
+                  <circle
+                    key={i}
+                    cx={toX(i)} cy={toY(v)} r={DOT_R}
+                    className={`chart-dot chart-dot-${results[i]}`}
+                  >
+                    <title>Hand {i + 1}: {results[i]} (net {v >= 0 ? '+' : ''}{v})</title>
+                  </circle>
+                ))}
+              </svg>
+
+              <div className="chart-x-axis" aria-hidden="true">
+                <span>Hand 1</span>
+                {nets.length > 4 && <span>Hand {Math.round(nets.length / 2)}</span>}
+                {nets.length > 1 && <span>Hand {nets.length}</span>}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      <div className="chart-legend" aria-label="Chart legend">
+        <div className="chart-legend-item">
+          <svg width="18" height="10" aria-hidden="true" style={{ flexShrink: 0 }}>
+            <line x1="0" y1="5" x2="18" y2="5" stroke="#4a84e8" strokeWidth="2" />
+          </svg>
+          Cumulative net
+        </div>
+        <div className="chart-legend-item">
+          <span className="chart-legend-swatch chart-legend-swatch-win-area" />
+          Ahead
+        </div>
+        <div className="chart-legend-item">
+          <span className="chart-legend-swatch chart-legend-swatch-loss-area" />
+          Behind
+        </div>
+        <div className="chart-legend-item">
+          <span className="chart-legend-dot-icon chart-legend-dot-win" />
+          Win
+        </div>
+        <div className="chart-legend-item">
+          <span className="chart-legend-dot-icon chart-legend-dot-loss" />
+          Loss
+        </div>
+        <div className="chart-legend-item">
+          <span className="chart-legend-dot-icon chart-legend-dot-push" />
+          Push
+        </div>
+      </div>
+
+      <div className="result-strip" role="list" aria-label="Individual hand results">
+        {results.map((r, i) => (
+          <div
+            key={i}
+            role="listitem"
+            className={`result-pip result-pip-${r}`}
+            title={`Hand ${i + 1}: ${r}`}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function App() {
   const [activeTarget, setActiveTarget] = useState<Target>('player')
   const [hands, dispatchHands] = useReducer(handsReducer, INITIAL_HANDS_STATE)
@@ -404,6 +612,9 @@ function App() {
   const [isPaPresetMode, setIsPaPresetMode] = useState<boolean>(true)
 
   const [trials, setTrials] = useState<number>(2500)
+  const [sessionResults, setSessionResults] = useState<SessionResult[]>([])
+  const handOutcomeRef = useRef<ReturnType<typeof resolveHandOutcome>>(null)
+
   const activePlayerHand = hands.playerHands[hands.activePlayerHandIndex] ?? {
     cards: [],
     doubled: false,
@@ -511,7 +722,17 @@ function App() {
     dispatchHands({ type: 'REDO' })
   }, [])
 
+  const addSessionResult = useCallback((result: SessionResult): void => {
+    setSessionResults((prev) => [...prev, result])
+  }, [])
+
   const clearAll = useCallback((): void => {
+    const outcome = handOutcomeRef.current
+    if (outcome) {
+      const result: SessionResult =
+        outcome === 'PLAYER WIN' ? 'win' : outcome === 'DEALER WIN' ? 'loss' : 'push'
+      setSessionResults((prev) => [...prev, result])
+    }
     dispatchHands({ type: 'CLEAR_ALL' })
     setActiveTarget('player')
   }, [])
@@ -598,6 +819,7 @@ function App() {
     '--win-rate-percent': `${winRatePercent}%`,
   } as CSSProperties
   const handOutcome = resolveHandOutcome(activePlayerHand.cards, hands.dealerCards)
+  handOutcomeRef.current = handOutcome
   const handOutcomeToneClass = handOutcome
     ? {
         'PLAYER WIN': 'outcome-player-win',
@@ -619,6 +841,15 @@ function App() {
     setLateSurrender(true)
     setIsPaPresetMode(true)
   }, [isPaPresetMode])
+
+  const sessionWins = sessionResults.filter((r) => r === 'win').length
+  const sessionLosses = sessionResults.filter((r) => r === 'loss').length
+  const sessionPushes = sessionResults.filter((r) => r === 'push').length
+  const sessionNet = sessionWins - sessionLosses
+  const sessionWinRate =
+    sessionResults.length > 0
+      ? Math.round((sessionWins / sessionResults.length) * 100)
+      : null
 
   return (
     <main className="app">
@@ -942,8 +1173,84 @@ function App() {
           </div>
         )}
       </section>
+      <section className="panel session-tracker">
+        <div className="session-tracker-header">
+          <h2>Session Results</h2>
+          <div className="session-tracker-actions">
+            <button
+              className="session-add-win icon-button"
+              onClick={() => addSessionResult('win')}
+            >
+              <Plus size={14} />
+              Win
+            </button>
+            <button
+              className="session-add-loss icon-button"
+              onClick={() => addSessionResult('loss')}
+            >
+              <Minus size={14} />
+              Loss
+            </button>
+            <button
+              className="session-add-push icon-button"
+              onClick={() => addSessionResult('push')}
+            >
+              Push
+            </button>
+            <button
+              className="danger"
+              disabled={sessionResults.length === 0}
+              onClick={() => setSessionResults([])}
+            >
+              Clear Results
+            </button>
+          </div>
+        </div>
+
+        <div className="session-stats">
+          <div className="session-stat session-stat-win">
+            <span className="session-stat-value">{sessionWins}</span>
+            <span className="session-stat-label">Wins</span>
+          </div>
+          <div className="session-stat session-stat-loss">
+            <span className="session-stat-value">{sessionLosses}</span>
+            <span className="session-stat-label">Losses</span>
+          </div>
+          <div className="session-stat session-stat-push">
+            <span className="session-stat-value">{sessionPushes}</span>
+            <span className="session-stat-label">Pushes</span>
+          </div>
+          <div className="session-stat">
+            <span className="session-stat-value">{sessionResults.length}</span>
+            <span className="session-stat-label">Hands</span>
+          </div>
+          <div
+            className={`session-stat ${
+              sessionNet > 0
+                ? 'session-stat-win'
+                : sessionNet < 0
+                  ? 'session-stat-loss'
+                  : ''
+            }`}
+          >
+            <span className="session-stat-value">
+              {sessionNet > 0 ? `+${sessionNet}` : sessionNet}
+            </span>
+            <span className="session-stat-label">Net</span>
+          </div>
+          <div className="session-stat">
+            <span className="session-stat-value">
+              {sessionWinRate !== null ? `${sessionWinRate}%` : '—'}
+            </span>
+            <span className="session-stat-label">Win Rate</span>
+          </div>
+        </div>
+
+        <SessionChart results={sessionResults} />
+      </section>
+
       <footer className="app-footer">
-        <span>v1.2.0 ©Nick Jackson</span>
+        <span>v1.3.0 © Nick Jackson</span>
       </footer>
     </main>
   )
